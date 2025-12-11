@@ -1,0 +1,691 @@
+/*
+ * eth.c
+ *
+ *  Created on: 2025/9/8
+ *      Author: user
+ */
+#include <string.h>
+#include "stm32f7xx.h"
+#include "stm32f7xx_hal_rcc.h"
+#include "cmsis_os.h"
+#include "iodefine.h"
+
+#include "eth.h"
+
+// マクロ
+#define DATA_BUFF_SIZE_MAX		(1536)
+#define BUFF_SISE_K				(64)
+#define PHY_ADDRESS				(0)
+#define TX_DISCRIPTOR_NUM		(6)
+
+// 機能マクロ
+#define MMC_ENABLE
+#define LOOPBACK_TEST_ENABLE
+
+// 状態定義
+#define ST_INIT		(0)		// 初期状態
+#define ST_CLOSE	(1)		// クローズ状態
+#define ST_OPEN		(2)		// オープン状態
+#define ST_MAX		(3)		// 最大値
+
+// 送信完了イベント
+#define EVT_SEND_SUCCESS	(1UL << 0)
+#define EVT_SEND_FAIL		(1UL << 1)
+
+// 送信ディスクリプタ
+#define TDES0_OWN	(1 << 31)
+#define TDES0_IC	(1 << 30)
+#define TDES0_LS	(1 << 29)
+#define TDES0_FS	(1 << 28)
+#define TDES0_DC	(1 << 27)
+#define TDES0_DP	(1 << 26)
+#define TDES0_TTSE	(1 << 25)
+#define TDES0_CIC	(((v) & 0x3) << 22)
+#define TDES0_TER	(1 << 21)
+#define TDES0_TCH	(1 << 20)
+#define TDES0_TTSS	(1 << 17)
+#define TDES0_IHE	(1 << 16)
+#define TDES0_ES	(1 << 15)
+#define TDES0_JT	(1 << 14)
+#define TDES0_FF	(1 << 13)
+#define TDES0_IPE	(1 << 12)
+#define TDES0_LCA	(1 << 11)
+#define TDES0_NC	(1 << 10)
+#define TDES0_LCO	(1 << 9)
+#define TDES0_EC	(1 << 8)
+#define TDES0_VF	(1 << 7)
+#define TDES0_CC	(((v) & 0xF) << 3)
+#define TDES0_ED	(1 << 2)
+#define TDES0_UF	(1 << 1)
+#define TDES0_DB	(1 << 0)
+#define TDES1_TBS1	(((v) & 0xF) << 3)
+
+// PHYレジスタ
+#define PHY_REG_BASIC_CONTROL										(0)
+#define PHY_REG_BASIC_STATUS										(1)
+#define PHY_REG_PHY_IDENTIFIER_1									(2)
+#define PHY_REG_PHY_IDENTIFIER_2									(3)
+#define PHY_REG_AUTO_NEG_ADVERTISEMENT								(4)
+#define PHY_REG_AUTO_NEG_LINK_PARTNER_ABILITY						(5)
+#define PHY_REG_AUTO_NEG_EXPANSION									(6)
+#define PHY_REG_AUTO_NEG_NEXT_PAGE_TX								(7)
+#define PHY_REG_AUTO_NEG_NEXT_PAGE_RX								(8)
+#define PHY_REG_MMD_ACCESS_CONTROL									(13)
+#define PHY_REG_MMD_ACCESS_ADDRESS_DATA								(14)
+#define PHY_REG_EDPD_NLP_CROSSOVER_TIME								(16)
+#define PHY_REG_MODE_CONTROL_STATUS									(17)
+#define PHY_REG_SPECIAL_MODES										(18)
+#define PHY_REG_TDR_PATTERNS_DELAY_CONTROL							(24)
+#define PHY_REG_TDR_CONTROL_STATUS									(25)
+#define PHY_REG_SYMBOL_ERROR_COUNTER								(26)
+#define PHY_REG_SPECIAL_CONTROL_STATUS_INDICATION					(27)
+#define PHY_REG_CABLE_LENGTH										(28)
+#define PHY_REG_INTERRUPT_SOURCE_FLAG								(29)
+#define PHY_REG_INTERRUPT_MASK										(30)
+#define PHY_REG_PHY_SPECIAL_CONTROL_STATUS							(31)
+
+// BASIC_CONTROL
+#define BASIC_CONTROL_SOFT_RESET									(1 << 15)
+#define BASIC_CONTROL_LOOP_BACK										(1 << 14)
+#define BASIC_CONTROL_SPEED_SELECT_10MBPS							(0 << 13)
+#define BASIC_CONTROL_SPEED_SELECT_100MBPS							(1 << 13)
+#define BASIC_CONTROL_POWER_DOWN									(1 << 11)
+#define BASIC_CONTROL_ISOLATE										(1 << 10)
+#define BASIC_CONTROL_RESTART_AUTO_NEGOTIATE						(1 << 9)
+#define BASIC_CONTROL_DUPLEX										(1 << 8)
+
+// BASIC STATUS
+#define BASIC_STAUS_100BASE_T4										(1 << 15)
+#define BASIC_STAUS_100BASE_TX_FULL_DUPLEX							(1 << 14)
+#define BASIC_STAUS_100BASE_TX_HALF_DUPLEX							(1 << 13)
+#define BASIC_STAUS_10BASE_T_FULL_DUPLEX							(1 << 12)
+#define BASIC_STAUS_10BASE_T_HALF_DUPLEX							(1 << 11)
+#define BASIC_STAUS_100BASE_T2_FULL_DUPLEX							(1 << 10)
+#define BASIC_STAUS_100BASE_T2_HALF_DUPLEX							(1 << 9)
+#define BASIC_STAUS_EXTENDED_STATUS									(1 << 8)
+#define BASIC_STAUS_AUTO_NEGOTIATE_COMPLETE							(1 << 5)
+#define BASIC_STAUS_REMOTE_FAULT									(1 << 4)
+#define BASIC_STAUS_AUTO_NEGOTIATE_ABILITY							(1 << 3)
+#define BASIC_STAUS_LINK_STATUS										(1 << 2)
+#define BASIC_STAUS_JABBER_DETECT									(1 << 1)
+#define BASIC_STAUS_EXTENDED_CAPABLITIES							(1 << 0)
+
+// AUTO_NEG_ADVERTISEMENT
+#define AUTO_NEG_ADVERTISEMENT_NEXT_PAGE							(1 << 15)
+#define AUTO_NEG_ADVERTISEMENT_REMOTE_FAULT							(1 << 13)
+#define AUTO_NEG_ADVERTISEMENT_PAUSE_OPERATION(v)					(((v) & 0x3) << 10)
+#define AUTO_NEG_ADVERTISEMENT_100BASE_TX_FULL_DUPLEX				(1 << 8)
+#define AUTO_NEG_ADVERTISEMENT_100BASE_TX							(1 << 7)
+#define AUTO_NEG_ADVERTISEMENT_10BASE_T_FULL_DUPLEX					(1 << 6)
+#define AUTO_NEG_ADVERTISEMENT_10BASE_TX							(1 << 5)
+
+// AUTO_NEG_LINK_PARTNER_ABILITY
+#define AUTO_NEG_LINK_PARTNER_ABILITY_NEXT_PAGE						(1 << 15)
+#define AUTO_NEG_LINK_PARTNER_ABILITY_REMOTE_FAULT					(1 << 13)
+#define AUTO_NEG_LINK_PARTNER_ABILITY_PAUSE_OPERATION(v)			(((v) & 0x3) << 10)
+#define AUTO_NEG_LINK_PARTNER_ABILITY_100BASE_T4					(1 << 9)
+#define AUTO_NEG_LINK_PARTNER_ABILITY_100BASE_TX_FULL_DUPLEX		(1 << 8)
+#define AUTO_NEG_LINK_PARTNER_ABILITY_100BASE_TX					(1 << 7)
+#define AUTO_NEG_LINK_PARTNER_ABILITY_10BASE_T_FULL_DUPLEX			(1 << 6)
+#define AUTO_NEG_LINK_PARTNER_ABILITY_10BASE_T						(1 << 5)
+
+// AUTO_NEG_EXPANSION
+#define AUTO_NEG_EXPANSION_RECEIVE_NEXT_PAGE_LOCATION_ABLE			(1 << 6)
+#define AUTO_NEG_EXPANSION_RECEIVED_NEXT_PAGE_STORAGE_LOCATION		(1 << 5)
+#define AUTO_NEG_EXPANSION_PARALLEL_DETECTION_FAULT					(1 << 4)
+#define AUTO_NEG_EXPANSION_LINK_PARTNER_NEXT_PAGE_ABLE				(1 << 3)
+#define AUTO_NEG_EXPANSION_NEXT_PAGE_ABLE							(1 << 2)
+#define AUTO_NEG_EXPANSION_PAGE_RECEIVED							(1 << 1)
+#define AUTO_NEG_EXPANSION_LINK_PARTNER_AUTO_NEG_ABLE				(1 << 0)
+
+// AUTO_NEG_NEXT_PAGE_TX
+#define AUTO_NEG_NEXT_PAGE_TX_NEXT_PAGE								(1 << 15)
+#define AUTO_NEG_NEXT_PAGE_TX_MESSAGE_PAGE							(1 << 13)
+#define AUTO_NEG_NEXT_PAGE_TX_ACKNOELEDGE_2							(1 << 12)
+#define AUTO_NEG_NEXT_PAGE_TX_TOGGLE								(1 << 11)
+#define AUTO_NEG_NEXT_PAGE_TX_MESSAGE_CODE							(0x2FF << 0)
+
+// AUTO_NEG_NEXT_PAGE_RX
+#define AUTO_NEG_NEXT_PAGE_RX_NEXT_PAGE								(1 << 15)
+#define AUTO_NEG_NEXT_PAGE_RX_MESSAGE_PAGE							(1 << 13)
+#define AUTO_NEG_NEXT_PAGE_RX_ACKNOELEDGE_2							(1 << 12)
+#define AUTO_NEG_NEXT_PAGE_RX_TOGGLE								(1 << 11)
+#define AUTO_NEG_NEXT_PAGE_RX_MESSAGE_CODE							(0x2FF << 0)
+
+// MMD_ACCESS_CONTROL
+#define MMD_ACCESS_CONTROL_MMD_FUNCTION								(0x3 << 14)
+#define MMD_ACCESS_CONTROL_MMD_DEVICE_ADDRESS						(0x1F << 0)
+
+// EDPD_NLP_CROSSOVER_TIME
+#define EDPD_NLP_CROSSOVER_TIME_TX_NLP_ENABLE						(1 << 15)
+#define EDPD_NLP_CROSSOVER_TIME_TX_NLP_INTERVAL_TIMER_SELECT		(0x3 << 14)
+#define EDPD_NLP_CROSSOVER_TIME_RX_SINGLE_NLP_WAKE_ENABLE			(1 << 12)
+#define EDPD_NLP_CROSSOVER_TIME_RX_NLP_MAX_INTERVAL_DETECT_SELECT	(0x3 << 14)
+
+// MMD
+#define MMD_DEVICE_ADDRESS_PCS										(3)
+#define MMD_DEVICE_ADDRESS_VENDOR									(30)
+
+// MMD_ACCESS_CONTROL
+#define MMD_FUNCTION_ADDRESS										(0)
+#define MMD_FUNCTION_DATA											(1)
+#define MMD_ACCESS_CONTROL_MMD_FUNCTION(v)							(((v) & 0x3) << 14)
+#define MMD_ACCESS_CONTROL_MMD_DEVICE_ADDRESS(v)					(((v) & 0x1F) << 0)
+
+// MMDレジスタ
+#define MMD_REG_PCS_MMD_DEVICE_PRESENT_1							(5)
+#define MMD_REG_PCS_MMD_DEVICE_PRESENT_2							(6)
+#define MMD_REG_WAKEUP_CONTROL_STATUS								(32784)
+#define MMD_REG_WAKEUP_FILTER_CONFIG_A								(32785)
+#define MMD_REG_WAKEUP_FILTER_CONFIG_B								(32786)
+#define MMD_REG_WAKEUP_FILTER_BYTE_MASK								(32801)
+#define MMD_REG_MAC_RECEIVE_ADDRESS_A								(32865)
+#define MMD_REG_MAC_RECEIVE_ADDRESS_B								(32866)
+#define MMD_REG_MAC_RECEIVE_ADDRESS_C								(32867)
+#define MMD_REG_VENDOR_SPECIFIC_MMD1_DEVICEID_1						(2)
+#define MMD_REG_VENDOR_SPECIFIC_MMD1_DEVICEID_2						(3)
+#define MMD_REG_VENDOR_SPECIFIC1_MMD_DEVICE_PRESENT_1				(5)
+#define MMD_REG_VENDOR_SPECIFIC1_MMD_DEVICE_PRESENT_2				(6)
+#define MMD_REG_VENDOR_SPECIFIC_MMD1_STATUS							(8)
+#define MMD_REG_TDR_MATCH_THRESHOLD									(11)
+#define MMD_REG_TDR_SHORT_OPEN_THRESHOLD							(12)
+#define MMD_REG_VENDOR_SPECIFIC_MMD1_PACKAGEID_1					(14)
+#define MMD_REG_VENDOR_SPECIFIC_MMD1_PACKAGEID_2					(15)
+
+// LED
+typedef enum {
+	LED_IDX_1 = 0,
+	LED_IDX_2,
+	LED_IDX_MAX,
+} LED_IDX;
+typedef enum {
+	LDE_FUNC_LINK_ACTIVITY = 0,
+	LDE_FUNC_nINT,
+	LDE_FUNC_nPME,
+	LDE_FUNC_LINK_SPEED,
+	LED_FUNC_MAX,
+}LED_FUNC;
+
+// レジスタ設定マクロ
+#define MACMIIAR_PA(v)							(((v) & 0x1F) << ETH_MACMIIAR_PA_Pos)	// 
+#define MACMIIAR_MR(v)							(((v) & 0x1F) << ETH_MACMIIAR_MR_Pos)	// 
+#define MACMIIAR_CR(v)							(((v) & 0x7)  << ETH_MACMIIAR_CR_Pos)	// 
+#define WUCSR_LED_FUNCTION_SELECT(idx,func)		(idx == LED_IDX_1) ? (((v) & 0x3)  << 13) : (((v) & 0x3)  << 11)
+
+// 制御ブロック
+typedef struct {
+	uint32_t		status;			// 状態
+	osMailQId		mail_handle;	// メールハンドル
+} ETH_CB;
+static ETH_CB eth_cb;
+#define get_myself() (&eth_cb)
+
+// チャネル情報
+typedef struct {
+	ETH_TypeDef		*p_reg;			// ベースレジスタ
+	IRQn_Type		global_irqn;	// 割り込み番号(グローバル)
+	IRQn_Type		wakeup_irqn;	// 割り込み番号(ウェイクアップ)
+	uint32_t		priority;		// 優先度
+} CH_INFO
+static const CH_INFO ch_info_tbl = {
+	ETH,	
+	ETH_IRQn,	
+	ETH_WKUP_IRQn,	
+	5
+};
+
+// MACアドレス
+static const uint8_t mac_address[6] = {
+	0x02, 0x00, 0x00, 0x00, 0x00, 0x01
+};
+
+// MMDレジスタ情報
+typedef struct {
+	uint16_t	index;
+	uint16_t	addr;
+} MMD_INFO;
+static const MMD_INFO mmd_info_tbl[] = {
+	{MMD_REG_PCS_MMD_DEVICE_PRESENT_1,				MMD_DEVICE_ADDRESS_PCS},
+	{MMD_REG_PCS_MMD_DEVICE_PRESENT_2,				MMD_DEVICE_ADDRESS_PCS},
+	{MMD_REG_WAKEUP_CONTROL_STATUS,					MMD_DEVICE_ADDRESS_PCS},
+	{MMD_REG_WAKEUP_FILTER_CONFIG_A,				MMD_DEVICE_ADDRESS_PCS},
+	{MMD_REG_WAKEUP_FILTER_CONFIG_B,				MMD_DEVICE_ADDRESS_PCS},
+	{MMD_REG_WAKEUP_FILTER_BYTE_MASK,				MMD_DEVICE_ADDRESS_PCS},
+	{MMD_REG_MAC_RECEIVE_ADDRESS_A,					MMD_DEVICE_ADDRESS_PCS},
+	{MMD_REG_MAC_RECEIVE_ADDRESS_B,					MMD_DEVICE_ADDRESS_PCS},
+	{MMD_REG_MAC_RECEIVE_ADDRESS_C,					MMD_DEVICE_ADDRESS_PCS},
+	{MMD_REG_VENDOR_SPECIFIC_MMD1_DEVICEID_1,		MMD_DEVICE_ADDRESS_VENDOR},
+	{MMD_REG_VENDOR_SPECIFIC_MMD1_DEVICEID_2,		MMD_DEVICE_ADDRESS_VENDOR},
+	{MMD_REG_VENDOR_SPECIFIC1_MMD_DEVICE_PRESENT_1,	MMD_DEVICE_ADDRESS_VENDOR},
+	{MMD_REG_VENDOR_SPECIFIC1_MMD_DEVICE_PRESENT_2,	MMD_DEVICE_ADDRESS_VENDOR},
+	{MMD_REG_VENDOR_SPECIFIC_MMD1_STATUS,			MMD_DEVICE_ADDRESS_VENDOR},
+	{MMD_REG_TDR_MATCH_THRESHOLD,					MMD_DEVICE_ADDRESS_VENDOR},
+	{MMD_REG_TDR_SHORT_OPEN_THRESHOLD,				MMD_DEVICE_ADDRESS_VENDOR},
+	{MMD_REG_VENDOR_SPECIFIC_MMD1_PACKAGEID_1,		MMD_DEVICE_ADDRESS_VENDOR},
+	{MMD_REG_VENDOR_SPECIFIC_MMD1_PACKAGEID_2,		MMD_DEVICE_ADDRESS_VENDOR},
+};
+
+// テスト用のためディスクリプタはペリフェラルドライバで持つ
+typedef struct {
+	uint32_t TDES[4];
+} TX_DESCRIPTOR;
+static TX_DESCRIPTOR tx_descriptor[TX_DISCRIPTOR_NUM] __ALIGNED(32);
+
+// バッファ
+static uint8_t tx_buffer[TX_DISCRIPTOR_NUM][DATA_BUFF_SIZE_MAX] __ALIGNED(32);
+
+// レジスタ設定
+static void eth_config(ETH_TypeDef *p_reg)
+{
+	// ソフトウェアリセット
+	p_reg->DMABMR = ETH_DMABMR_SR;
+	while ((p_reg->DMABMR & ETH_DMABMR_SR) != 0) {};
+	
+	// DMA設定
+	// Tx FIFO : 256 bytes
+	// Rx FIFO : 128 bytes
+	// バースト長は16word(16*4=64byte)
+	p_reg->DMABMR |= (ETH_DMABMR_FB | ETH_DMABMR_AAB | ETH_DMABMR_PBL_16Beat);
+	
+	// 送信ディスクリプタのアドレスを設定
+	p_reg->DMATDLAR = (uint32_t)&(tx_descriptor[0]);
+	
+	// ループバック設定
+#ifdef LOOPBACK_TEST_ENABLE
+	// ROD(1)  : Receive own 有効 → 
+	loopback_setting = ETH_MACCR_ROD | ETH_MACCR_LM;
+#endif
+	
+	// レジスタ設定
+	// CSTF(1) : CRC stripping有効 → FCSを削除してバッファに格納
+	// WD(0)   : ウォッチドッグ有効 → 2048byte以降は切り捨てる
+	// JD(0)   : Jabber 有効 → 2048byte以上送信しようとすると
+	// IPCO(1) : - IPヘッダー、TCP/UDPチェックサムを自動検証
+	// APCS(1) : - パディング領域とFCSを自動的に除去
+	p_reg->MACCR = ETH_MACCR_CSTF | ETH_MACCR_IPCO | ETH_MACCR_APCS;
+	
+	// フィルタレジスタ設定
+	// HPF(0)  : MACアドレスレジスタと完全一致する場合のみ受信※1の場合は、ハッシュ
+	// SAF(0)  : 送信元MACアドレスはチェックされず、通常の受信処理
+	// SAIF(0) : 通常のSAF動作（送信元MACが一致すれば受信）
+	// PCF(0)  : 制御フレームを破棄
+	// BFD(0)  : ブロードキャストフレームを受信
+	// PAM(0)  : マルチキャストアドレスは ハッシュテーブルや完全一致フィルタで選別される
+	// DAIF(0) : 宛先MACアドレスが MACA1HR/MACA1LR に一致すれば受信
+	// HM(0)   : マルチキャストアドレスはハッシュフィルタされない
+	// HU(0)   : ユニキャストアドレスは完全一致（Perfect Filter）でのみ受信
+	// PM(0)   : - MACアドレスフィルタが有効。自分宛のフレームのみ受信
+ 	p_reg->MACFFR = 0;
+	
+	// ハッシュフィルタは使用しない
+	p_reg->MACHTHR = 0;
+	p_reg->MACHTLR = 0;
+	
+	// フロー制御
+	// いったんデフォルト設定
+	p_reg->MACFCR = 0;
+	
+	// VLAN設定
+	// VLANはいったん使わない
+	p_reg->MACVLANTR = 0;
+	
+	// ウェイクアップ設定
+	// ウェイクアップはいったん使わない
+	p_reg->MACRWUFFR = 0;
+	p_reg->MACPMTCSR = 0;
+	
+	// マックアドレス設定
+	p_reg->MACA0HR |= (((uint32_t)mac_address[5] << 8) | ((uint32_t)mac_address[4] << 0));
+	p_reg->MACA0LR |= (((uint32_t)mac_address[3] << 24) | ((uint32_t)mac_address[2] << 16) | 
+	                   ((uint32_t)mac_address[1] << 8) | ((uint32_t)mac_address[0] << 0));
+	
+	// MACA1~3LR、MACA1~3HRはいったん使用しない
+	
+#ifdef MMC_ENABLE
+	// カウンタリセット
+	p_reg->MMCCR |= ETH_MMCCR_CR;
+	
+	// 送受信割り込み有効
+	p_reg->MMCRIR |= (ETH_MMCRIR_RGUFS | ETH_MMCRIR_RFAES | ETH_MMCRIR_RFCES);
+	p_reg->MMCTIR |= (ETH_MMCTIR_TGFS | ETH_MMCTIR_TGFMSCS | ETH_MMCTIR_TGFSCS);
+	
+#endif
+	
+	// タイムスタンプ機能は有効
+	//  TSPFFMAE(1)  : 受信フレームの宛先MACアドレスが一致する場合にタイムスタンプを生成
+	//  TSSMRME(1)   : マスター宛のメッセージに対してのみ受信時にタイムスタンプスナップショットを取得する
+	//  TSSEME(1)    : PTPイベントメッセージ（Sync, Delay_Req など）に対してのみ、タイムスタンプスナップショットを取得する
+	//  TSSIPV4FE(1) : IPv4パケットに対してのみタイムスタンプスナップショットを取得
+	p_reg->PTPTSCR |= (ETH_PTPTSCR_TSPFFMAE | ETH_PTPTSCR_TSSMRME | ETH_PTPTSCR_TSSEME | ETH_PTPTSCR_TSSIPV4FE | ETH_PTPTSCR_TSE);
+	
+	// 送受信有効
+	p_reg->MACCR |= (ETH_MACCR_TE | ETH_MACCR_RE);
+	
+}
+
+// ディスクリプタ設定
+static void desc_config(void)
+{
+	TX_DESCRIPTOR *p_cur_desc;
+	TX_DESCRIPTOR *p_nxt_desc;
+	uint8_t i;
+	
+	// ディスクリプタ設定
+	for (i = 0; i < (TX_DISCRIPTOR_NUM - 1); i++) {
+		// ディスクリプタ取得
+		p_cur_desc = &tx_descriptor[i];
+		p_nxt_desc = &tx_descriptor[i + 1];
+		// 次のディスクリプタのアドレスを取得
+		p_cur_desc->TDES[3] = (uint32_t)p_nxt_desc;
+	}
+}
+
+// PHYレジスタ読み出し
+static osStatus phy_read(ETH_TypeDef *p_reg, uin8_t phy_reg, uint16_t *data)
+{
+	osStatus ercd = osErrorTimeoutResource;
+	uint8_t timeout = 10;
+	
+	// PHYアドレスとリードしたいレジスタのインデックスを設定
+	p_reg->MACMIIAR = MACMIIAR_PA(PHY_ADDRESS) | MACMIIAR_MR(phy_reg);
+	
+	// クロックはデフォルト設定
+	p_reg->MACMIIAR |= MACMIIAR_CR(0);
+	
+	// 読みとり開始
+	p_reg->MACMIIAR |= ETH_MACMIIAR_MB;
+	
+	// 読み出しが終わるまで待つ
+	while (timeout--) {
+		if ((p_reg->MACMIIAR & ETH_MACMIIAR_MB) == 0) {
+			ercd = osOK;
+			break;
+		}
+	}
+	
+	// 読み出し
+	*data = p_reg->MACMIIDR;
+	
+	return ercd;
+}
+
+// PHYレジスタ書き込み
+static osStatus phy_write(ETH_TypeDef *p_reg, uin8_t phy_reg, uint16_t data)
+{
+	osStatus ercd = osErrorTimeoutResource;
+	uint8_t timeout = 10;
+	
+	// 書き込み
+	p_reg->MACMIIDR = data;
+	
+	// 書き込み開始
+	p_reg->MACMIIAR = MACMIIAR_PA(PHY_ADDRESS) | MACMIIAR_MR(phy_reg) | ETH_MACMIIAR_MW | ETH_MACMIIAR_MB;
+	
+	// 書き込みが終わるまで待つ
+	while (timeout--) {
+		if ((p_reg->MACMIIAR & ETH_MACMIIAR_MB) == 0) {
+			ercd = osOK;
+			break;
+		}
+	}
+	
+	return ercd;
+}
+
+// MMDレジスタ読み出し
+static osStatus mmd_read(ETH_TypeDef *p_reg, uin16_t index, uint16_t *data)
+{
+	osStatus ercd;
+	uint16_t set_val = 0;
+	uint8_t i;
+	
+	// アドレス取得
+	for (i = 0; i < sizeof(mmd_info_tbl)/sizeof(mmd_info_tbl[0]); i++) {
+		if (mmd_info_tbl[0].index == index) {
+			break;
+		}
+	}
+	if (i >= sizeof(mmd_info_tbl)/sizeof(mmd_info_tbl[0])) {
+		ercd = osErrorResource;
+		goto EXIT;
+	}
+	
+	// アクセス制御レジスタ書き込み
+	set_val = mmd_info_tbl[i].addr;
+	if ((ercd != phy_write(p_reg, PHY_REG_MMD_ACCESS_CONTROL, set_val)) != osOK) {
+		goto EXIT;
+	}
+	
+	// アクセス/データレジスタ書き込み
+	if ((ercd != phy_write(p_reg, PHY_REG_MMD_ACCESS_ADDRESS_DATA, index)) != osOK) {
+		goto EXIT;
+	}
+	
+	// アクセス制御レジスタ書き込み
+	set_val |= MMD_ACCESS_CONTROL_MMD_FUNCTION(MMD_FUNCTION_DATA);
+	if ((ercd != phy_write(p_reg, PHY_REG_MMD_ACCESS_CONTROL, set_val)) != osOK) {
+		goto EXIT;
+	}
+	
+	// アクセス/データレジスタ読み込み
+	if ((ercd != phy_read(p_reg, PHY_REG_MMD_ACCESS_ADDRESS_DATA, data)) != osOK) {
+		goto EXIT;
+	}
+	
+EXIT:
+	return ercd;
+}
+
+// MMDレジスタ読み出し
+static osStatus mmd_write(ETH_TypeDef *p_reg, uin16_t index, uint16_t data)
+{
+	osStatus ercd;
+	uint16_t set_val = 0;
+	uint8_t i;
+	
+	// アドレス取得
+	for (i = 0; i < sizeof(mmd_info_tbl)/sizeof(mmd_info_tbl[0]); i++) {
+		if (mmd_info_tbl[0].index == index) {
+			break;
+		}
+	}
+	if (i >= sizeof(mmd_info_tbl)/sizeof(mmd_info_tbl[0])) {
+		ercd = osErrorResource;
+		goto EXIT;
+	}
+	
+	// アクセス制御レジスタ書き込み
+	set_val = mmd_info_tbl[i].addr;
+	if ((ercd != phy_write(p_reg, PHY_REG_MMD_ACCESS_CONTROL, set_val)) != osOK) {
+		goto EXIT;
+	}
+	
+	// アクセス/データレジスタ書き込み
+	if ((ercd != phy_write(p_reg, PHY_REG_MMD_ACCESS_ADDRESS_DATA, index)) != osOK) {
+		goto EXIT;
+	}
+	
+	// アクセス制御レジスタ書き込み
+	set_val |= MMD_ACCESS_CONTROL_MMD_FUNCTION(MMD_FUNCTION_DATA);
+	if ((ercd != phy_write(p_reg, PHY_REG_MMD_ACCESS_CONTROL, set_val)) != osOK) {
+		goto EXIT;
+	}
+	
+	// アクセス/データレジスタ書き込み
+	if ((ercd != phy_write(p_reg, PHY_REG_MMD_ACCESS_ADDRESS_DATA, data)) != osOK) {
+		goto EXIT;
+	}
+	
+EXIT:
+	return ercd;
+}
+
+// LED機能選択
+static osStatus set_led_func(LED_IDX idx, LED_FUNC func)
+{
+	uint16_t set_val = 0;
+	osStatus ercd;
+	
+	// 設定値
+	set_val = WUCSR_LED_FUNCTION_SELECT(idx func);
+	
+	// 書き込み
+	if ((ercd != mmd_write(p_reg, MMD_REG_WAKEUP_CONTROL_STATUS, data)) != osOK) {
+		goto EXIT;
+	}
+	
+	return ercd;
+}
+
+// 初期化
+void eth_init(void)
+{
+	ETH_CB *this = get_myself();
+	
+	// コンテキストクリア
+	memset(this, 0, sizeof(ETH_CB));
+	
+	// ディスクリプタクリア
+	memset(&tx_descriptor[0], 0, sizeof(TX_DESCRIPTOR*TX_DISCRIPTOR_NUM));
+	
+	// メールキュー作成 (*) 64*1024byteのメモリを確保
+	osMailQDef(ConsoleSendBuf, BUFF_SISE_K, 1024);
+	this->mail_handle = osMailCreate(osMailQ(ConsoleSendBuf), NULL);
+	
+	// 状態更新
+	this->status = ST_CLOSE;
+	
+}
+
+// オープン
+osStatus eth_open(ETH_OPEN *p_par)
+{
+	ETH_CB *this = get_myself();
+	ETH_TypeDef *p_reg;
+	uint32_t loopback_setting = 0;
+	
+	// パラメータチェック
+	if (p_par == NULL) {
+		return osErrorParameter;
+	}
+	
+	// 初期化していない場合はエラー
+	if (this->status != osErrorResource) {
+		return osErrorResource;
+	}
+	
+	// レジスタのベースアドレスを取得
+	p_reg = ch_info_tbl.p_reg;
+	
+	// レジスタ設定
+	eth_config(p_reg);
+	
+	// ディスクリプタ設定
+	desc_config();
+	
+	// 状態更新
+	this->status = ST_OPEN;
+	
+	return osOK;
+}
+
+// 送信
+osStatus eth_send(uint8_t *p_data, uint32_t size)
+{
+	ETH_CB *this = get_myself();
+	ETH_TypeDef *p_reg;
+	uint32_t remain_size = size;
+	uint32_t send_size;
+	uint8_t descriptor_idx = 0;
+	uint32_t tdes0 = 0;
+	TX_DESCRIPTOR *p_desc;
+	osEvent event;
+	osStatus ercd;
+	
+	// パラメータチェック
+	if ((p_data == NULL) || (size == 0)) {
+		return osErrorParameter;
+	}
+	
+	// オープンしていない場合はエラー
+	if (this->status != ST_OPEN) {
+		return osErrorResource;
+	}
+	
+	// レジスタのベースアドレスを取得
+	p_reg = ch_info_tbl.p_reg;
+	
+	// tdes0設定
+	tdes0 |= TDES0_FS;
+	
+	// ディスクリプタとバッファ作成
+	while (remain_size != 0) {
+		// 初回データ or 中間データ
+		if (remain_size > DATA_BUFF_SIZE_MAX) {
+			// 送信サイズ決定
+			send_size = DATA_BUFF_SIZE_MAX;
+			
+		// 最終データ
+		} else {
+			// 送信サイズは残りのサイズ
+			send_size = remain_size;
+			// 最終セグメント、送信完了設定
+			tdes0 |= (TDES0_LS|TDES0_IC);
+			
+		}
+		
+		
+		
+		
+		
+		
+		SCB_CleanDCache_by_Addr(&(tx_buffer[buf_idx[0]][0]), DATA_BUFF_SIZE_MAX);
+		
+		// ディスクリプタクリア
+		p_desc = &(tx_descriptor[descriptor_idx]);
+		memset(p_desc, 0, sizeof(TX_DESCRIPTOR));
+		
+		// TDES0～2設定
+		p_desc->TDES[2] = (uint32_t)&(tx_buffer[descriptor_idx][0]);
+		p_desc->TDES[1] = 
+		
+		// TDES0設定
+		p_desc->TDES[0] = tdes0;
+		
+		
+		
+		
+		
+		// 残りサイズの計算
+		if (remain_size > DATA_BUFF_SIZE_MAX) {
+			remain_size -= DATA_BUFF_SIZE_MAX;
+			
+		} else {
+			remain_size = 0;
+			
+		}
+	}
+	
+	// 送信開始
+	p_reg->DMAOMR |= ETH_DMAOMR_ST;
+	
+	// 送信完了まち
+	event = osSignalWait((EVT_SEND_SUCCESS|EVT_SEND_FAIL), osWaitForever);
+	// OSエラー発生
+	if (event.status != osEventSignal) {
+		ercd = event.status;
+		
+	// 送信成功
+	} else if (event.value.signals == EVT_SEND_SUCCESS) {
+		ercd = osOK;
+		
+	// 送信失敗
+	} else if (event.value.signals == EVT_SEND_FAIL) {
+		ercd = osErrorISR;	// 良いエラーコードがない...
+		
+	}
+	
+	return ercd;
+}
+
+
