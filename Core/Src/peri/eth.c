@@ -9,11 +9,12 @@
 #include "stm32f7xx_hal_rcc.h"
 #include "cmsis_os.h"
 #include "iodefine.h"
+#include "console.h"
 
 #include "eth.h"
 
 // マクロ
-#define DATA_BUFF_SIZE_MAX		(1536)
+#define DATA_BUFF_SIZE_MAX		(1504)
 #define BUFF_SISE_K				(64)
 #define PHY_ADDRESS				(0)
 #define TX_DISCRIPTOR_NUM		(6)
@@ -30,35 +31,37 @@
 
 // 送信完了イベント
 #define EVT_SEND_SUCCESS	(1UL << 0)
-#define EVT_SEND_FAIL		(1UL << 1)
+#define EVT_RECV_SUCCESS	(1UL << 1)
+#define EVT_SEND_FAIL		(1UL << 2)
 
 // 送信ディスクリプタ
-#define TDES0_OWN	(1 << 31)
-#define TDES0_IC	(1 << 30)
-#define TDES0_LS	(1 << 29)
-#define TDES0_FS	(1 << 28)
-#define TDES0_DC	(1 << 27)
-#define TDES0_DP	(1 << 26)
-#define TDES0_TTSE	(1 << 25)
-#define TDES0_CIC	(((v) & 0x3) << 22)
-#define TDES0_TER	(1 << 21)
-#define TDES0_TCH	(1 << 20)
-#define TDES0_TTSS	(1 << 17)
-#define TDES0_IHE	(1 << 16)
-#define TDES0_ES	(1 << 15)
-#define TDES0_JT	(1 << 14)
-#define TDES0_FF	(1 << 13)
-#define TDES0_IPE	(1 << 12)
-#define TDES0_LCA	(1 << 11)
-#define TDES0_NC	(1 << 10)
-#define TDES0_LCO	(1 << 9)
-#define TDES0_EC	(1 << 8)
-#define TDES0_VF	(1 << 7)
-#define TDES0_CC	(((v) & 0xF) << 3)
-#define TDES0_ED	(1 << 2)
-#define TDES0_UF	(1 << 1)
-#define TDES0_DB	(1 << 0)
-#define TDES1_TBS1	(((v) & 0xF) << 3)
+#define TDES0_OWN		(1 << 31)
+#define TDES0_IC		(1 << 30)
+#define TDES0_LS		(1 << 29)
+#define TDES0_FS		(1 << 28)
+#define TDES0_DC		(1 << 27)
+#define TDES0_DP		(1 << 26)
+#define TDES0_TTSE		(1 << 25)
+#define TDES0_CIC		(((v) & 0x3) << 22)
+#define TDES0_TER		(1 << 21)
+#define TDES0_TCH		(1 << 20)
+#define TDES0_TTSS		(1 << 17)
+#define TDES0_IHE		(1 << 16)
+#define TDES0_ES		(1 << 15)
+#define TDES0_JT		(1 << 14)
+#define TDES0_FF		(1 << 13)
+#define TDES0_IPE		(1 << 12)
+#define TDES0_LCA		(1 << 11)
+#define TDES0_NC		(1 << 10)
+#define TDES0_LCO		(1 << 9)
+#define TDES0_EC		(1 << 8)
+#define TDES0_VF		(1 << 7)
+#define TDES0_CC		(((v) & 0xF) << 3)
+#define TDES0_ED		(1 << 2)
+#define TDES0_UF		(1 << 1)
+#define TDES0_DB		(1 << 0)
+#define TDES1_TBS1(v)	(((v) & 0x0FFF) << 0)
+#define TDES1_TBS2(v)	(((v) & 0x0FFF) << 16)
 
 // PHYレジスタ
 #define PHY_REG_BASIC_CONTROL										(0)
@@ -152,10 +155,6 @@
 #define AUTO_NEG_NEXT_PAGE_RX_TOGGLE								(1 << 11)
 #define AUTO_NEG_NEXT_PAGE_RX_MESSAGE_CODE							(0x2FF << 0)
 
-// MMD_ACCESS_CONTROL
-#define MMD_ACCESS_CONTROL_MMD_FUNCTION								(0x3 << 14)
-#define MMD_ACCESS_CONTROL_MMD_DEVICE_ADDRESS						(0x1F << 0)
-
 // EDPD_NLP_CROSSOVER_TIME
 #define EDPD_NLP_CROSSOVER_TIME_TX_NLP_ENABLE						(1 << 15)
 #define EDPD_NLP_CROSSOVER_TIME_TX_NLP_INTERVAL_TIMER_SELECT		(0x3 << 14)
@@ -210,12 +209,13 @@ typedef enum {
 #define MACMIIAR_PA(v)							(((v) & 0x1F) << ETH_MACMIIAR_PA_Pos)	// 
 #define MACMIIAR_MR(v)							(((v) & 0x1F) << ETH_MACMIIAR_MR_Pos)	// 
 #define MACMIIAR_CR(v)							(((v) & 0x7)  << ETH_MACMIIAR_CR_Pos)	// 
-#define WUCSR_LED_FUNCTION_SELECT(idx,func)		(idx == LED_IDX_1) ? (((v) & 0x3)  << 13) : (((v) & 0x3)  << 11)
+#define WUCSR_LED_FUNCTION_SELECT(idx,func)		(idx == LED_IDX_1) ? (((func) & 0x3)  << 13) : (((func) & 0x3)  << 11)
 
 // 制御ブロック
 typedef struct {
 	uint32_t		status;			// 状態
 	osMailQId		mail_handle;	// メールハンドル
+	osThreadId		thread_id;		// タスクID
 } ETH_CB;
 static ETH_CB eth_cb;
 #define get_myself() (&eth_cb)
@@ -226,7 +226,7 @@ typedef struct {
 	IRQn_Type		global_irqn;	// 割り込み番号(グローバル)
 	IRQn_Type		wakeup_irqn;	// 割り込み番号(ウェイクアップ)
 	uint32_t		priority;		// 優先度
-} CH_INFO
+} CH_INFO;
 static const CH_INFO ch_info_tbl = {
 	ETH,	
 	ETH_IRQn,	
@@ -271,24 +271,97 @@ typedef struct {
 } TX_DESCRIPTOR;
 static TX_DESCRIPTOR tx_descriptor[TX_DISCRIPTOR_NUM] __ALIGNED(32);
 
-// バッファ
-static uint8_t tx_buffer[TX_DISCRIPTOR_NUM][DATA_BUFF_SIZE_MAX] __ALIGNED(32);
+// 割り込みハンドラ
+void ETH_IRQHandler(void)
+{
+	ETH_CB *this = get_myself();
+	ETH_TypeDef *p_reg;
+	uint16_t macsr;
+	uint32_t dmasr;
+	uint32_t dmaier;
+	
+	// レジスタのベースアドレスを取得
+	p_reg = ch_info_tbl.p_reg;
+	
+	// 各レジスタの値を取得
+	macsr = p_reg->MACSR;
+	dmasr = p_reg->DMASR;
+	dmaier = p_reg->DMAIER;
+	
+	// エラー確認
+	if ((dmasr & ETH_DMASR_EBS) != 0) {
+		// イベント送信
+		osSignalSet(this->thread_id, EVT_SEND_FAIL);
+		return;
+	}
+	
+	// 受信完了
+	if (((dmaier & ETH_DMAIER_RIE) != 0) && ((dmasr & ETH_DMASR_RS) != 0)) {
+		// イベント送信
+		osSignalSet(this->thread_id, EVT_RECV_SUCCESS);
+		
+	// 送信完了
+	} else if (((dmaier & ETH_DMAIER_TIE) != 0) && ((dmasr & ETH_DMASR_TS) != 0)) {
+		// イベント送信
+		osSignalSet(this->thread_id, EVT_SEND_SUCCESS);
+		
+	// その他
+	} else {
+		;
+		
+	}
+}
+
+/**
+  * @brief This function handles Ethernet wake-up interrupt through EXTI line 19.
+  */
+void ETH_WKUP_IRQHandler(void)
+{
+	
+}
+
+// DMAリセット
+static void dma_reset(ETH_TypeDef *p_reg)
+{
+	uint32_t timeout = 1000;
+	
+	p_reg->MACCR &= ~(ETH_MACCR_TE | ETH_MACCR_RE);
+	p_reg->DMAOMR &= ~(ETH_DMAOMR_ST | ETH_DMAOMR_SR);
+	p_reg->DMABMR |= ETH_DMABMR_SR;
+	while ((p_reg->DMABMR & ETH_DMABMR_SR) != 0) {
+		if (--timeout == 0) {
+			break;  // SR が読めない errata 対策
+		}
+	}
+}
 
 // レジスタ設定
 static void eth_config(ETH_TypeDef *p_reg)
 {
-	// ソフトウェアリセット
-	p_reg->DMABMR = ETH_DMABMR_SR;
-	while ((p_reg->DMABMR & ETH_DMABMR_SR) != 0) {};
+	uint32_t loopback_setting;
+	volatile uint32_t tmp_reg;
+	
+	// クロック有効
+	__HAL_RCC_SYSCFG_CLK_ENABLE();
+	
+	  /* Select MII or RMII Mode*/
+	SYSCFG->PMC &= ~(SYSCFG_PMC_MII_RMII_SEL);
+	SYSCFG->PMC |= (uint32_t)HAL_ETH_RMII_MODE;	
+	
+	// DMAリセット
+	dma_reset(p_reg);
+	
+	// 送信ディスクリプタのアドレスを設定
+	p_reg->DMATDLAR = (uint32_t)&(tx_descriptor[0]);
 	
 	// DMA設定
 	// Tx FIFO : 256 bytes
 	// Rx FIFO : 128 bytes
 	// バースト長は16word(16*4=64byte)
 	p_reg->DMABMR |= (ETH_DMABMR_FB | ETH_DMABMR_AAB | ETH_DMABMR_PBL_16Beat);
-	
-	// 送信ディスクリプタのアドレスを設定
-	p_reg->DMATDLAR = (uint32_t)&(tx_descriptor[0]);
+	tmp_reg = p_reg->DMABMR;
+	// ディレイ
+	osDelay(1);
 	
 	// ループバック設定
 #ifdef LOOPBACK_TEST_ENABLE
@@ -335,8 +408,8 @@ static void eth_config(ETH_TypeDef *p_reg)
 	p_reg->MACPMTCSR = 0;
 	
 	// マックアドレス設定
-	p_reg->MACA0HR |= (((uint32_t)mac_address[5] << 8) | ((uint32_t)mac_address[4] << 0));
-	p_reg->MACA0LR |= (((uint32_t)mac_address[3] << 24) | ((uint32_t)mac_address[2] << 16) | 
+	p_reg->MACA0HR = (((uint32_t)mac_address[5] << 8) | ((uint32_t)mac_address[4] << 0));
+	p_reg->MACA0LR = (((uint32_t)mac_address[3] << 24) | ((uint32_t)mac_address[2] << 16) | 
 	                   ((uint32_t)mac_address[1] << 8) | ((uint32_t)mac_address[0] << 0));
 	
 	// MACA1~3LR、MACA1~3HRはいったん使用しない
@@ -357,6 +430,9 @@ static void eth_config(ETH_TypeDef *p_reg)
 	//  TSSEME(1)    : PTPイベントメッセージ（Sync, Delay_Req など）に対してのみ、タイムスタンプスナップショットを取得する
 	//  TSSIPV4FE(1) : IPv4パケットに対してのみタイムスタンプスナップショットを取得
 	p_reg->PTPTSCR |= (ETH_PTPTSCR_TSPFFMAE | ETH_PTPTSCR_TSSMRME | ETH_PTPTSCR_TSSEME | ETH_PTPTSCR_TSSIPV4FE | ETH_PTPTSCR_TSE);
+	
+	// 割り込み設定
+	p_reg->DMAIER |= (ETH_DMAIER_NISE | ETH_DMAIER_AISE | ETH_DMAIER_RIE | ETH_DMAIER_TIE);
 	
 	// 送受信有効
 	p_reg->MACCR |= (ETH_MACCR_TE | ETH_MACCR_RE);
@@ -381,7 +457,7 @@ static void desc_config(void)
 }
 
 // PHYレジスタ読み出し
-static osStatus phy_read(ETH_TypeDef *p_reg, uin8_t phy_reg, uint16_t *data)
+static osStatus phy_read(ETH_TypeDef *p_reg, uint8_t phy_reg, uint16_t *data)
 {
 	osStatus ercd = osErrorTimeoutResource;
 	uint8_t timeout = 10;
@@ -410,7 +486,7 @@ static osStatus phy_read(ETH_TypeDef *p_reg, uin8_t phy_reg, uint16_t *data)
 }
 
 // PHYレジスタ書き込み
-static osStatus phy_write(ETH_TypeDef *p_reg, uin8_t phy_reg, uint16_t data)
+static osStatus phy_write(ETH_TypeDef *p_reg, uint8_t phy_reg, uint16_t data)
 {
 	osStatus ercd = osErrorTimeoutResource;
 	uint8_t timeout = 10;
@@ -433,7 +509,7 @@ static osStatus phy_write(ETH_TypeDef *p_reg, uin8_t phy_reg, uint16_t data)
 }
 
 // MMDレジスタ読み出し
-static osStatus mmd_read(ETH_TypeDef *p_reg, uin16_t index, uint16_t *data)
+static osStatus mmd_read(ETH_TypeDef *p_reg, uint16_t index, uint16_t *data)
 {
 	osStatus ercd;
 	uint16_t set_val = 0;
@@ -452,23 +528,23 @@ static osStatus mmd_read(ETH_TypeDef *p_reg, uin16_t index, uint16_t *data)
 	
 	// アクセス制御レジスタ書き込み
 	set_val = mmd_info_tbl[i].addr;
-	if ((ercd != phy_write(p_reg, PHY_REG_MMD_ACCESS_CONTROL, set_val)) != osOK) {
+	if ((ercd = phy_write(p_reg, PHY_REG_MMD_ACCESS_CONTROL, set_val)) != osOK) {
 		goto EXIT;
 	}
 	
 	// アクセス/データレジスタ書き込み
-	if ((ercd != phy_write(p_reg, PHY_REG_MMD_ACCESS_ADDRESS_DATA, index)) != osOK) {
+	if ((ercd = phy_write(p_reg, PHY_REG_MMD_ACCESS_ADDRESS_DATA, index)) != osOK) {
 		goto EXIT;
 	}
 	
 	// アクセス制御レジスタ書き込み
 	set_val |= MMD_ACCESS_CONTROL_MMD_FUNCTION(MMD_FUNCTION_DATA);
-	if ((ercd != phy_write(p_reg, PHY_REG_MMD_ACCESS_CONTROL, set_val)) != osOK) {
+	if ((ercd = phy_write(p_reg, PHY_REG_MMD_ACCESS_CONTROL, set_val)) != osOK) {
 		goto EXIT;
 	}
 	
 	// アクセス/データレジスタ読み込み
-	if ((ercd != phy_read(p_reg, PHY_REG_MMD_ACCESS_ADDRESS_DATA, data)) != osOK) {
+	if ((ercd = phy_read(p_reg, PHY_REG_MMD_ACCESS_ADDRESS_DATA, data)) != osOK) {
 		goto EXIT;
 	}
 	
@@ -477,7 +553,7 @@ EXIT:
 }
 
 // MMDレジスタ読み出し
-static osStatus mmd_write(ETH_TypeDef *p_reg, uin16_t index, uint16_t data)
+static osStatus mmd_write(ETH_TypeDef *p_reg, uint16_t index, uint16_t data)
 {
 	osStatus ercd;
 	uint16_t set_val = 0;
@@ -496,23 +572,23 @@ static osStatus mmd_write(ETH_TypeDef *p_reg, uin16_t index, uint16_t data)
 	
 	// アクセス制御レジスタ書き込み
 	set_val = mmd_info_tbl[i].addr;
-	if ((ercd != phy_write(p_reg, PHY_REG_MMD_ACCESS_CONTROL, set_val)) != osOK) {
+	if ((ercd = phy_write(p_reg, PHY_REG_MMD_ACCESS_CONTROL, set_val)) != osOK) {
 		goto EXIT;
 	}
 	
 	// アクセス/データレジスタ書き込み
-	if ((ercd != phy_write(p_reg, PHY_REG_MMD_ACCESS_ADDRESS_DATA, index)) != osOK) {
+	if ((ercd = phy_write(p_reg, PHY_REG_MMD_ACCESS_ADDRESS_DATA, index)) != osOK) {
 		goto EXIT;
 	}
 	
 	// アクセス制御レジスタ書き込み
 	set_val |= MMD_ACCESS_CONTROL_MMD_FUNCTION(MMD_FUNCTION_DATA);
-	if ((ercd != phy_write(p_reg, PHY_REG_MMD_ACCESS_CONTROL, set_val)) != osOK) {
+	if ((ercd = phy_write(p_reg, PHY_REG_MMD_ACCESS_CONTROL, set_val)) != osOK) {
 		goto EXIT;
 	}
 	
 	// アクセス/データレジスタ書き込み
-	if ((ercd != phy_write(p_reg, PHY_REG_MMD_ACCESS_ADDRESS_DATA, data)) != osOK) {
+	if ((ercd = phy_write(p_reg, PHY_REG_MMD_ACCESS_ADDRESS_DATA, data)) != osOK) {
 		goto EXIT;
 	}
 	
@@ -521,17 +597,51 @@ EXIT:
 }
 
 // LED機能選択
-static osStatus set_led_func(LED_IDX idx, LED_FUNC func)
+static osStatus set_led_func(ETH_TypeDef *p_reg, LED_IDX idx, LED_FUNC func)
 {
 	uint16_t set_val = 0;
 	osStatus ercd;
 	
 	// 設定値
-	set_val = WUCSR_LED_FUNCTION_SELECT(idx func);
+	set_val = WUCSR_LED_FUNCTION_SELECT(idx, func);
 	
 	// 書き込み
-	if ((ercd != mmd_write(p_reg, MMD_REG_WAKEUP_CONTROL_STATUS, data)) != osOK) {
+	if ((ercd = mmd_write(p_reg, MMD_REG_WAKEUP_CONTROL_STATUS, set_val)) != osOK) {
 		goto EXIT;
+	}
+	
+EXIT:
+	return ercd;
+}
+
+// 送信完了待ち
+static osStatus send_wait(ETH_TypeDef *p_reg)
+{
+	TX_DESCRIPTOR *p_desc;
+	osEvent event;
+	osStatus ercd;
+	
+	// 先頭ディスクリプタのOWNビットをセット
+	p_desc = &(tx_descriptor[0]);
+	p_desc->TDES[0] |= TDES0_OWN;
+	
+	// 送信開始
+	p_reg->DMAOMR |= ETH_DMAOMR_ST;
+	
+	// 送信完了まち
+	event = osSignalWait((EVT_SEND_SUCCESS|EVT_SEND_FAIL), osWaitForever);
+	// OSエラー発生
+	if (event.status != osEventSignal) {
+		ercd = event.status;
+		
+	// 送信成功
+	} else if (event.value.signals == EVT_SEND_SUCCESS) {
+		ercd = osOK;
+		
+	// 送信失敗
+	} else if (event.value.signals == EVT_SEND_FAIL) {
+		ercd = osErrorISR;	// 良いエラーコードがない...
+		
 	}
 	
 	return ercd;
@@ -546,7 +656,7 @@ void eth_init(void)
 	memset(this, 0, sizeof(ETH_CB));
 	
 	// ディスクリプタクリア
-	memset(&tx_descriptor[0], 0, sizeof(TX_DESCRIPTOR*TX_DISCRIPTOR_NUM));
+	memset(&tx_descriptor[0], 0, sizeof(TX_DESCRIPTOR)*TX_DISCRIPTOR_NUM);
 	
 	// メールキュー作成 (*) 64*1024byteのメモリを確保
 	osMailQDef(ConsoleSendBuf, BUFF_SISE_K, 1024);
@@ -570,7 +680,7 @@ osStatus eth_open(ETH_OPEN *p_par)
 	}
 	
 	// 初期化していない場合はエラー
-	if (this->status != osErrorResource) {
+	if (this->status != ST_CLOSE) {
 		return osErrorResource;
 	}
 	
@@ -599,7 +709,6 @@ osStatus eth_send(uint8_t *p_data, uint32_t size)
 	uint8_t descriptor_idx = 0;
 	uint32_t tdes0 = 0;
 	TX_DESCRIPTOR *p_desc;
-	osEvent event;
 	osStatus ercd;
 	
 	// パラメータチェック
@@ -612,18 +721,23 @@ osStatus eth_send(uint8_t *p_data, uint32_t size)
 		return osErrorResource;
 	}
 	
+	// タスク情報を取得
+	this->thread_id = osThreadGetId();
+	
 	// レジスタのベースアドレスを取得
 	p_reg = ch_info_tbl.p_reg;
 	
 	// tdes0設定
-	tdes0 |= TDES0_FS;
+	tdes0 |= TDES0_FS | TDES0_TCH;
 	
-	// ディスクリプタとバッファ作成
+	// 全部送信
 	while (remain_size != 0) {
 		// 初回データ or 中間データ
 		if (remain_size > DATA_BUFF_SIZE_MAX) {
 			// 送信サイズ決定
 			send_size = DATA_BUFF_SIZE_MAX;
+			// 残りのサイズ計算
+			remain_size -= DATA_BUFF_SIZE_MAX;
 			
 		// 最終データ
 		} else {
@@ -631,61 +745,50 @@ osStatus eth_send(uint8_t *p_data, uint32_t size)
 			send_size = remain_size;
 			// 最終セグメント、送信完了設定
 			tdes0 |= (TDES0_LS|TDES0_IC);
+			// 残りのサイズ計算
+			remain_size = 0;
 			
 		}
 		
-		
-		
-		
-		
-		
-		SCB_CleanDCache_by_Addr(&(tx_buffer[buf_idx[0]][0]), DATA_BUFF_SIZE_MAX);
-		
-		// ディスクリプタクリア
+		// ディスクリプタ取得
 		p_desc = &(tx_descriptor[descriptor_idx]);
-		memset(p_desc, 0, sizeof(TX_DESCRIPTOR));
 		
 		// TDES0～2設定
-		p_desc->TDES[2] = (uint32_t)&(tx_buffer[descriptor_idx][0]);
-		p_desc->TDES[1] = 
+		p_desc->TDES[2] = (uint32_t)p_data;
+		p_desc->TDES[1] = TDES1_TBS1(send_size);
 		
 		// TDES0設定
 		p_desc->TDES[0] = tdes0;
 		
+		// フラッシュ
+		SCB_CleanDCache_by_Addr(p_data, send_size);
 		
+		// 次の送信準備
+		descriptor_idx++;
+		p_data += send_size;
+		tdes0 &= ~TDES0_FS;		// 次のディスクリプタにはFSは立ててはいけない
+		tdes0 |= TDES0_OWN;		// 最初のディスクリプタにはセットしない
 		
-		
-		
-		// 残りサイズの計算
-		if (remain_size > DATA_BUFF_SIZE_MAX) {
-			remain_size -= DATA_BUFF_SIZE_MAX;
+		// もう残りない
+		if (remain_size == 0) {
+			;
 			
+		// ディスクリプタももうない
+		} else if (descriptor_idx >= TX_DISCRIPTOR_NUM) {
+			descriptor_idx = 0;
+			
+			
+		// その他
 		} else {
-			remain_size = 0;
+			continue;
 			
+		}
+		
+		// 送信失敗したなら終了
+		if (send_wait(p_reg) != osOK) {
+			break;
 		}
 	}
 	
-	// 送信開始
-	p_reg->DMAOMR |= ETH_DMAOMR_ST;
-	
-	// 送信完了まち
-	event = osSignalWait((EVT_SEND_SUCCESS|EVT_SEND_FAIL), osWaitForever);
-	// OSエラー発生
-	if (event.status != osEventSignal) {
-		ercd = event.status;
-		
-	// 送信成功
-	} else if (event.value.signals == EVT_SEND_SUCCESS) {
-		ercd = osOK;
-		
-	// 送信失敗
-	} else if (event.value.signals == EVT_SEND_FAIL) {
-		ercd = osErrorISR;	// 良いエラーコードがない...
-		
-	}
-	
 	return ercd;
-}
-
-
+}	
